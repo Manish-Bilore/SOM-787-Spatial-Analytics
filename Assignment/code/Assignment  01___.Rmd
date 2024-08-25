@@ -1,0 +1,790 @@
+---
+title: "SOM 787 Spatial Analytics-I Class Assignment 01"
+output: html_notebook
+---
+
+$$
+\textbf{Objective:}\\
+\text{Analysing changes of Prevalence of crimes against women across districts and states in India from 
+2020 to 2022}
+$$
+
+$$
+\textbf{Install and Load packages}
+$$
+Install all the necessary libraries
+
+```{r}
+# Define a vector of required packages
+packages <- c(
+  "tidyverse",    # For data manipulation and visualization
+  "sf",           # For simple feature operations (handling spatial data)
+  "here",         # For managing file paths
+  "patchwork",    # For organizing multiple plots
+  "raster",       # For handling raster data
+  "exactextractr",# For extracting data from raster objects
+  "tidygeocoder", # For geocoding (converting addresses to geographic coordinates)
+  "ggmap",        # For spatial visualization and mapping
+  "ggspatial",    # For adding spatial context to ggplot2 visualizations
+  "epitrix",      # For epidemiological analysis
+  "janitor",      # For data cleaning
+  "leaflet",      # For interactive maps
+  "HistData",     # For historical datasets
+  "gtsummary",     # For creating summary tables
+  "spdep", 
+  "tmap"
+)
+```
+
+```{r}
+# Extract not installed packages
+not_installed <- packages[!(packages %in% installed.packages()[ , "Package"])]    
+
+# Install not installed packages
+if(length(not_installed)) install.packages(not_installed)                               
+```
+
+Load packages 
+```{r}
+suppressPackageStartupMessages(lapply(packages, library, character.only = TRUE))
+```
+
+
+$$
+\textbf{Load and check/clean Data}
+$$
+$$
+\text{Load Non-Spatial Data}
+$$
+
+```{r}
+# Load the crime  data
+crime_df <- read_csv(here("data", "crime_dateset_india - Sheet1.csv"))
+```
+
+```{r}
+# Explore the crime data
+crime_df |> 
+  glimpse()
+```
+
+```{r}
+# Clean the column names using the 'clean_names' function from the 'janitor' package and display the new names
+# This standardizes column names to lower_case_with_underscores
+crime_df |> 
+  janitor::clean_names() |> 
+  names()
+```
+
+```{r}
+# Lowercase all data entries
+crime_df <- data.frame(lapply(crime_df, function(x) {
+  if (is.character(x)) {
+    return(tolower(x))
+  } else {
+    return(x)
+  }
+}), stringsAsFactors = FALSE)
+```
+
+```{r}
+# Rename columns
+colnames(crime_df) <- c("sl_no", "district", "state", "censuscode", "rr_2020", "ll_2020", "ul_2020", "rr_2022", "ll_2022", "ul_2022")
+```
+
+```{r}
+head(crime_df)
+```
+$$
+\text{Load Spatial Data}
+$$
+
+```{r}
+# Load the India district shape file
+india_district_sf <- read_rds(here("spatial_files","india_district_sf.rds"))
+```
+
+```{r}
+# Explore the India district shape file
+india_district_sf |> 
+  glimpse()
+```
+```{r}
+india_district_sf
+```
+```{r}
+# Convert the spatial data into Geodetic CRS
+india_district_sf <- india_district_sf |> 
+  st_transform(4326)
+
+# Check the CRS of the spatial data
+india_district_sf |> st_crs()
+```
+```{r}
+# To clean the state district column 
+# Define a list of state and union territories names
+
+state_names <- c(
+  # States
+  "andhra_pradesh", "arunachal_pradesh", "assam", "bihar", "chhattisgarh", "goa",
+  "gujarat", "haryana", "himachal_pradesh", "jharkhand", "karnataka", "kerala",
+  "madhya_pradesh", "maharashtra", "manipur", "meghalaya", "mizoram", "nagaland",
+  "odisha", "punjab", "rajasthan", "sikkim", "tamil_nadu", "telangana",
+  "tripura", "uttar_pradesh", "uttarakhand", "west_bengal",
+
+  # Union Territories
+  "andaman_nicobar_islands", "chandigarh", "dadra_nagar_haveli_and_daman_diu",
+  "lakshadweep", "nct_delhi", "puducherry", "ladakh", "jammu_kashmir"
+)
+```
+
+```{r}
+# Function to separate district and state
+split_district_state <- function(df, column_name, state_list) {
+  df <- df |> 
+    mutate(
+      # Identify the state part in each entry
+      state = sapply(str_split(!!sym(column_name), "_"), function(parts) {
+        state_match <- ""
+        for (i in seq_along(parts)) {
+          candidate <- paste(parts[i:length(parts)], collapse = "_")
+          if (candidate %in% state_list) {
+            state_match <- candidate
+            break
+          }
+        }
+        state_match
+      }),
+      # Remove the state part from the district name
+      district = sapply(str_split(!!sym(column_name), "_"), function(parts) {
+        state_match <- ""
+        for (i in seq_along(parts)) {
+          candidate <- paste(parts[i:length(parts)], collapse = "_")
+          if (candidate %in% state_list) {
+            state_match <- candidate
+            break
+          }
+        }
+        # Keep only the parts before the state name
+        district_parts <- parts[1:(which(parts == unlist(str_split(state_match, "_"))[1])-1)]
+        paste(district_parts, collapse = "_")
+      })
+    )
+  return(df)
+}
+```
+
+```{r}
+# Apply the function 
+india_district_sf <- 
+  split_district_state(india_district_sf, "district_unique", state_names)
+```
+```{r}
+# Drop the extra column - "district_unique"
+india_district_sf <- india_district_sf[, c(2,3,4)]
+```
+
+$$
+\text{Match the state names in spatial and non spatial data set}
+$$
+```{r}
+# Check the state names that are present in the crime data but not in the spatial data
+(crime_df$state |> unique()) %in%  crime_df$state
+(crime_df$state |> unique())[!(crime_df$state |> unique()) %in%  india_district_sf$state]
+```
+
+```{r}
+# Clean the State names so that they can be matched in both the data sets
+crime_df <- crime_df |>
+  mutate(
+    state = case_when(
+      state == "jammu & kashmir"             ~ "jammu_kashmir" ,
+      state == "himachal pradesh"            ~ "himachal_pradesh",
+      state == "nct of delhi"                ~ "nct_delhi",
+      state == "uttar pradesh"               ~ "uttar_pradesh",
+      state == "arunanchal pradesh"          ~ "arunachal_pradesh" ,
+      state == "west bengal"                 ~ "west_bengal" ,
+      state == "madhya pradesh"              ~ "madhya_pradesh" ,
+      state == "daman & diu"                 ~ "dadra_nagar_haveli_and_daman_diu",
+      state == "dadara & nagar havelli"      ~ "dadra_nagar_haveli_and_daman_diu" ,
+      state == "andhra pradesh"              ~ "andhra_pradesh",
+      state == "tamil nadu"                  ~ "tamil_nadu",
+      state == "andaman & nicobar island"    ~ "andaman_nicobar_islands",
+      
+      TRUE ~ state
+    )
+  )
+```
+
+```{r}
+# Check the state names that are present in the crime data but not in the spatial data
+(crime_df$state |> unique()) %in%  crime_df$state
+(crime_df$state |> unique())[!(crime_df$state |> unique()) %in%  india_district_sf$state]
+```
+$$
+\text{Match the district names in spatial and non spatial data set}
+$$
+
+
+```{r}
+# Check the district names that are present in the crime data but not in the spatial data
+(crime_df$district |> unique()) %in%  crime_df$district
+(crime_df$district |> unique())[!(crime_df$district |> unique()) %in%  india_district_sf$district]
+```
+
+```{r}
+# Clean the district names so that they can be matched in both the data sets
+crime_df <- crime_df |>
+  mutate(
+    district = case_when(
+      district == "ahmadabad"                ~ "ahmedabad",
+      district == "ahmadnagar"               ~ "ahmednagar",
+      district == "allahabad"                ~ "prayagraj",
+      district == "ambedkar nagar"           ~ "ambedkar_nagar",
+      district == "banas kantha"             ~ "banaskantha",
+      district == "bangalore rural"          ~ "bangalore_rural",
+      district == "bara banki"               ~ "barabanki",
+      district == "barddhaman"               ~ "barddhaman", # 2017, this was split in purab barddhaman and paschim barddhaman
+      district == "bauda"                    ~ "bharuch",
+      district == "chamrajnagar"             ~ "chamarajanagar",
+      district == "dadra & nagar haveli"     ~ "dadra", 
+      district == "dakshin bastar dantewada" ~ "dantewada", 
+      district == "dakshin dinajpur"         ~ "dakshin_dinajpur",
+      district == "dakshina kannada"         ~ "dakshina_kannada",
+      district == "darjiling"                ~ "darjeeling",
+      district == "dibang valley"            ~ "dibang_valley",
+      district == "dima hasao"               ~ "dima_hasao",
+      district == "dohad"                    ~ "dahod",
+      district == "east garo hills"          ~ "east_garo_hills",
+      district == "east godavari"            ~ "east_godavari",
+      district == "east kameng"              ~ "east_kameng",
+      district == "east khasi hills"         ~ "east_khasi_hills",
+      district == "east nimar"               ~ "khandwa_east_nimar",
+      district == "east siang"               ~ "east_siang",
+      district == "fatehgarh sahib"          ~ "fatehgarh_sahib",
+      district == "garhchiroli"              ~ "gadchiroli",
+      district == "garhwal"                  ~ "pauri_garhwal",
+      district == "gautam buddha nagar"      ~ "gautam_buddha_nagar",
+      district == "gurdaspur"                ~ "gurudaspur",
+      district == "haora"                    ~ "howrah",
+      district == "hardwar"                  ~ "haridwar",
+      district == "hugli"                    ~ "hooghly",
+      district == "imphal east"              ~ "imphal_east",
+      district == "imphal west"              ~ "imphal_west",
+      district == "jaintia hills"            ~ "jaintia_hills", # here are two east and west
+      district == "janjgir-champa"           ~ "janjgir_champa",
+      district == "jyotiba phule nagar"      ~ "jyotiba_phule_nagar",
+      district == "kaimur (bhabua)"          ~ "kaimur_bhabua",
+      district == "kamrup metropolitan"      ~ "kamrup_metropolitan",
+      district == "kanpur dehat"             ~ "kanpur_dehat",
+      district == "kanpur nagar"             ~ "kanpur_nagar",
+      district == "kansiram nagar"           ~ "kanshiram_nagar",
+      district == "karbi anglong"            ~ "karbi_anglong", 
+      district == "koch bihar"               ~ "koch_bihar",
+      district == "kurung kumey"             ~ "kurung_kumey",
+      district == "lahul & spiti"            ~ "lahul_spiti",
+      district == "lawangtlai"               ~ "lawngtlai",
+      district == "leh (ladakh)"             ~ "leh",
+      district == "lower dibang valley"      ~ "lower_dibang_valley",
+      district == "lower subansiri"          ~ "lower_subansiri",
+      district == "mahamaya nagar"           ~ "mahamaya_nagar",
+      district == "mahbubnagar"              ~ "mahabubnagar",
+      district == "marigaon"                 ~ "morigaon",
+      district == "mumbai suburban"          ~ "mumbai_suburban",
+      district == "nagappattinam"            ~ "nagapattinam",
+      district == "narsimhapur"              ~ "narsinghpur",
+      district == "new delhi"                ~ "new_delhi",
+      district == "north & middle andaman"   ~ "north_middle", 
+      district == "north 24 parganas"        ~ "north_twenty_four_parganas",
+      district == "north east"               ~ "north_east",
+      district == "north goa"                ~ "north",
+      district == "north tripura"            ~ "north",
+      district == "north west"               ~ "north_west",
+      district == "panch mahals"             ~ "panchmahal",
+      district == "papum pare"               ~ "papum_pare",
+      district == "pashchim champaran"       ~ "pashchim_champaran",
+      district == "pashchim medinipur"       ~ "paschim_medinipur",
+      district == "pashchimi singhbhum"      ~ "pashchimi_singhbhum",
+      district == "purba champaran"          ~ "purba_champaran",
+      district == "purba medinipur"          ~ "purba_medinipur",
+      district == "purbi singhbhum"          ~ "purbi_singhbhum",
+      district == "rae bareli"               ~ "rae_bareli",
+      district == "rangareddy"               ~ "ranga_reddy",
+      district == "ri bhoi"                  ~ "ribhoi",
+      district == "sabar kantha"             ~ "sabarkantha",
+      district == "sahibzada ajit singh nagar" ~ "sahibzada_ajit_singh_nagar",
+      district == "sant kabir nagar"         ~ "sant_kabeer_nagar",
+      district == "sant ravi das nagar(bhadohi)" ~ "sant_ravidas_nagar_bhadohi",
+      district == "saraikela-kharsawan"      ~ "saraikela_kharsawan",
+      district == "saran (chhapra)"          ~ "saran",
+      district == "sawai madhopur"           ~ "sawai_madhopur",
+      district == "shahid bhagat singh nagar" ~ "shahid_bhagat_singh_nagar",
+      district == "shrawasti"                ~ "shravasti",
+      district == "siddharth nagar"          ~ "siddharthnagar",
+      district == "south 24 parganas"        ~ "south_twenty_four_parganas",
+      district == "south andaman"            ~ "south",
+      district == "south garo hills"         ~ "south_garo_hills",
+      district == "south goa"                ~ "south",
+      district == "south tripura"            ~ "south",
+      district == "south west"               ~ "south_west",
+      district == "sri potti sriramulu nellore" ~ "sri_potti_sriramulu_nellore",
+      district == "tarn taran"               ~ "tarn_taran",
+      district == "tehri garhwal"            ~ "tehri_garhwal",
+      district == "the dangs"                ~ "the_dangs",
+      district == "the nilgiris"             ~ "the_nilgiris",
+      district == "udham singh nagar"        ~ "udam_singh_nagar",
+      district == "upper siang"              ~ "upper_siang",
+      district == "upper subansiri"          ~ "upper_subansiri",
+      district == "uttar bastar kanker"      ~ "uttar_bastar_kanker",
+      district == "uttar dinajpur"           ~ "uttar_dinajpur",
+      district == "uttara kannada"           ~ "uttara_kannada",
+      district == "virudunagar"              ~ "virudhunagar",
+      district == "warangal"                 ~ "warangal", # there is warangal_urban to be merged
+      district == "west garo hills"          ~ "west_garo_hills",
+      district == "west godavari"            ~ "west_godavari",
+      district == "west kameng"              ~ "west_kameng",
+      district == "west khasi hills"         ~ "west_khasi_hills",
+      district == "west nimar"               ~ "khargone_west_nimar",
+      district == "west siang"               ~ "west_siang",
+      district == "west tripura"             ~ "west",
+      district == "y.s.r."                   ~ "y_s_r",
+      TRUE ~ district
+    )
+  )
+```
+
+```{r}
+# Check the district names that are present in the crime data but not in the spatial data
+(crime_df$district |> unique()) %in%  crime_df$district
+(crime_df$district |> unique())[!(crime_df$district |> unique()) %in%  india_district_sf$district]
+```
+
+```{r}
+# Merge the districts in spatial data where the non spatial data refers to only one district (i.e before admin partition)
+merge_districts <- function(sf_data, districts_to_merge, new_district_name) {
+  # Check if all districts to merge exist in the dataset
+  if (!all(districts_to_merge %in% sf_data$district)) {
+    stop("One or more districts to merge are not present in the dataset.")
+  }
+  
+  # Merge the geometries of the specified districts
+  merged_geom <- sf_data |>
+    filter(district %in% districts_to_merge) |>
+    summarise(geometry = st_union(geometry), .groups = 'drop')
+  
+  # Create a new data frame for the merged district
+  merged_district <- sf_data |>
+    filter(district %in% districts_to_merge) |>
+    select(state) |>
+    distinct() |>
+    mutate(district = new_district_name)
+  
+  # Combine the new merged district with the rest of the data
+  result_sf <- rbind(
+    sf_data |>
+      filter(!district %in% districts_to_merge),  # Keep districts that were not merged
+    st_sf(merged_district, geometry = merged_geom$geometry)  # Add the merged district
+  )
+  
+  return(result_sf)
+}
+```
+
+```{r}
+# Merge Warangal
+merged <- merge_districts(india_district_sf, c("warangal_rural", "warangal_urban"), "warangal")
+merged <- merge_districts(merged, c("warangal", "warangal"), "warangal")
+```
+
+
+```{r}
+# Merge Jaintia Hills
+merged <- merge_districts(merged, c("east_jaintia_hills", "west_jaintia_hills"), "jaintia_hills")
+merged <- merge_districts(merged, c("jaintia_hills", "jaintia_hills"), "jaintia_hills")
+```
+
+```{r}
+# Merge Barddhaman
+merged <- merge_districts(merged, c("paschim_barddhaman", "purba_barddhaman"), "barddhaman")
+merged <- merge_districts(merged, c("barddhaman", "barddhaman"), "barddhaman")
+```
+
+```{r}
+glimpse(merged)
+```
+
+```{r}
+# Set the data to MULTIPOLYGON
+merged <- st_cast(merged, "MULTIPOLYGON")
+```
+
+
+```{r}
+# Print and plot the result
+print(merged)
+plot(merged)
+```
+
+
+$$
+\text{Merge the spatial and non-spatial data}
+$$
+```{r}
+# Merge the non-spatial and spatial data based on the 'district' column
+district_crime_sf <- merged |> 
+  st_make_valid() |>
+  group_by(district) |>
+  summarise() |>
+  left_join(crime_df, by = "district")
+```
+
+```{r}
+# Set the data to MULTIPOLYGON
+district_crime_sf <- st_cast(district_crime_sf, "MULTIPOLYGON")
+```
+
+```{r}
+# Drop extra col
+district_crime_sf <- district_crime_sf[, -c(2)]
+```
+
+```{r}
+# Check the structure of the merged data
+district_crime_sf
+```
+
+```{r}
+# Plot the map
+district_crime_sf |> 
+  ggplot() +
+  geom_sf()
+```
+
+```{r}
+# Change color palette for better visualization
+
+# rr_2022 with color palette
+district_crime_sf |> 
+  ggplot() +
+  geom_sf(aes(fill = rr_2022)) + 
+  scale_fill_distiller(palette = "Spectral")
+
+# rr_2020 with color palette
+district_crime_sf |> 
+  ggplot() +
+  geom_sf(aes(fill = rr_2020)) + 
+  scale_fill_distiller(palette = "Spectral")
+
+# Plot rr_2022 and rr_2020 side by side using patchwork
+
+# Create individual plots
+rr_2022 <- district_crime_sf |> 
+  ggplot() +
+  geom_sf(aes(fill = rr_2022)) + 
+  scale_fill_distiller(palette = "Spectral") +
+  labs(title = "Relative Risk 2022")
+
+rr_2020 <- district_crime_sf |> 
+  ggplot() +
+  geom_sf(aes(fill = rr_2020)) + 
+  scale_fill_distiller(palette = "Spectral") +
+  labs(title = "Relative Risk 2020")
+
+
+# add North Arrow and Scale from the ggspatial package
+rr_2022 <- district_crime_sf |> 
+  ggplot() +
+  geom_sf(aes(fill = rr_2022)) + 
+  scale_fill_distiller(palette = "Spectral") +
+  labs(title = "Relative Risk 2022") +
+  annotation_north_arrow(location = "tr", which_north = "true", style = north_arrow_minimal) +
+  annotation_scale()
+
+rr_2020 <- district_crime_sf |> 
+  ggplot() +
+  geom_sf(aes(fill = rr_2020)) + 
+  scale_fill_distiller(palette = "Spectral") +
+  labs(title = "Relative Risk 2020") +
+  annotation_north_arrow(location = "tr", which_north = "true", style = north_arrow_minimal) +
+  annotation_scale()
+
+```
+
+```{r}
+# Combine the plots
+rr_2020 +rr_2022
+
+# Adjust scales for a common legend
+(rr_2020 + rr_2022) + 
+  plot_layout(guides = "collect") & 
+  scale_fill_distiller(palette = "Spectral", limits = range(c(district_crime_sf$rr_2020, district_crime_sf$rr_2022)))
+
+# Final plot with title and common legend
+rr_crime <- ((rr_2020 + theme(legend.position = "none")) + rr_2022) + 
+  plot_layout(ncol = 2,
+              guides = "collect") +
+  plot_annotation(title = 
+  "Prevalence Distribution of Relative Risk of crimes against women across districts and states in India from 2020 to 2022",
+  caption = "Data Source: Data on crimes against women for the period 2020 and 2022 obtained from the National Crime Records Bureau (NCRB) of India",
+  theme = theme(plot.title = element_text(hjust = 0.125, size = 12))) & 
+  scale_fill_distiller("Relative Risk", palette = "Spectral", limits = range(c(district_crime_sf$rr_2020, district_crime_sf$rr_2022)))
+
+rr_crime
+
+```
+
+```{r}
+# Save the final plot
+ggsave(
+  filename = here("plots","rr_crime.png"),
+  plot = last_plot(),
+  scale = 1,
+  width = 12,
+  height = 9,
+  dpi = 300,
+)
+```
+
+$$
+\textbf{Moran's I}
+$$
+
+```{r}
+moran_global <- function(data, column) {
+  # Check for non-finite values (NA, NaN, Inf)
+  non_finite_values <- !is.finite(column)
+  
+  # Impute with the mean (instance)
+  column[!is.finite(column)] <- mean(column, na.rm = TRUE)
+  
+  # Replace Inf and -Inf with the maximum and minimum finite values
+  column[column == Inf] <-
+    max(column[is.finite(column)], na.rm = TRUE)
+  
+  column[column == -Inf] <-
+    min(column[is.finite(column)], na.rm = TRUE)
+  
+  # Define neighboring polygons # https://mgimond.github.io/simple_moransI_example/
+  nb <- poly2nb(data, queen = TRUE)
+  
+  # Assign weights to the neighbors
+  lw <- nb2listw(nb, style="W", zero.policy=TRUE)
+  
+  # Compute the (weighted) neighbor mean column values
+  lag <- lag.listw(lw, column)
+  
+  
+  # plot the relationship between column values and its spatially lagged counterpart. 
+  # The fitted blue line added to the plot is the result of an OLS regression model. 
+  
+  plot(lag ~ column, pch = 16, asp = 1)
+  
+  M1 <- lm(lag ~ column)
+  
+  abline(M1, col = "blue")
+  
+  print("The slope of the line is the Moran’s I coefficient: ")
+  print(coef(M1)[2])
+  
+  # Moran’s I analysis using the analytical method
+  print(moran.test(column,lw, alternative="greater"))
+  
+}
+```
+
+```{r}
+# assign the variables 
+data   <- district_crime_sf
+```
+
+```{r}
+# Calculate Global Moran
+moran_global_rr_2020 <- moran_global(data, data$rr_2020)
+moran_global_rr_2022 <- moran_global(data, data$rr_2022)
+```
+$$
+\textbf{Local Moran Map}
+$$
+```{r}
+moran_local <- function(data, column) {
+  # Check for non-finite values (NA, NaN, Inf)
+  non_finite_values <- !is.finite(column)
+  
+  # Impute with the mean (instance)
+  column[!is.finite(column)] <- mean(column, na.rm = TRUE)
+  
+  # Replace Inf and -Inf with the maximum and minimum finite values
+  column[column == Inf] <-
+    max(column[is.finite(column)], na.rm = TRUE)
+  
+  column[column == -Inf] <-
+    min(column[is.finite(column)], na.rm = TRUE)
+  
+  # Define neighboring polygons # https://mgimond.github.io/simple_moransI_example/
+  nb <- poly2nb(data, queen = TRUE)
+  
+  # Assign weights to the neighbors
+  lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
+  
+  # Compute the (weighted) neighbor mean column values
+  lag <- lag.listw(lw, column)
+  
+  # Calculate Local Moran's I statistics for each spatial unit
+  local_moran <- localmoran(column, lw)
+  
+  # Add Local Moran's I and p-values to the data set
+  data$local_moran_I <- local_moran[, 1]  # Local Moran's I values
+  data$local_moran_p <- local_moran[, 5]  # p-values
+  
+  # Classify the Results https://spatialanalysis.github.io/handsonspatialdata/local-spatial-autocorrelation-1.html#significance
+  
+  # Define significance level (e.g., 0.05)
+  significance_level <- 0.05
+  
+  # Create a classification based on Local Moran's I and p-values
+  data$local_moran_category <- "Not Significant"
+  
+  data$local_moran_category[data$local_moran_I > 0 &
+                              data$local_moran_p <= significance_level] <- "High-High"
+  
+  data$local_moran_category[data$local_moran_I < 0 &
+                              data$local_moran_p <= significance_level] <- "Low-Low"
+  
+  data$local_moran_category[data$local_moran_I > 0 &
+                              data$local_moran_p > significance_level] <- "High-Low"
+  
+  data$local_moran_category[data$local_moran_I < 0 &
+                              data$local_moran_p > significance_level] <- "Low-High"
+  
+  # Convert to factor for better visualization
+  data$local_moran_category <-
+    factor(
+      data$local_moran_category,
+      levels = c(
+        "Not Significant",
+        "High-High",
+        "Low-Low",
+        "High-Low",
+        "Low-High"
+      )
+    )
+  
+  return(data)
+  
+}
+```
+
+```{r}
+# Calculate Local Moran
+moran_local_rr_2020 <- moran_local(data, data$rr_2020)
+moran_local_rr_2022 <- moran_local(data, data$rr_2022)
+```
+
+
+```{r}
+# LISA plot 2020
+lisa_map_rr_2020 <- tm_shape(moran_local_rr_2020) +
+  tm_polygons("local_moran_category", 
+              palette = c("#d9d9d9", "#e41a1c", "#377eb8", "#ffffb3", "#8dd3c7"), 
+              title = "LISA Map for Relative Risk 2020",
+              style = "cat") +
+  tm_borders() +
+  tm_layout(legend.outside = TRUE, 
+            title = "Local Moran's I Clusters")  +
+tm_scale_bar(position = c("left", "bottom"), width = "100 km", text.size = 0.5) +
+tm_compass(position = c("right", "top"), type = "arrow", size = 2)
+
+# LISA plot 2022
+lisa_map_rr_2022 <- tm_shape(moran_local_rr_2022) +
+  tm_polygons("local_moran_category", 
+              palette = c("#d9d9d9", "#e41a1c", "#377eb8", "#ffffb3", "#8dd3c7"), 
+              title = "LISA Map for Relative Risk 2022",
+              style = "cat") +
+  tm_borders() +
+  tm_layout(legend.outside = TRUE, 
+            title = "Local Moran's I Clusters")  +
+tm_scale_bar(position = c("left", "bottom"), width = "100 km", text.size = 0.5) +
+tm_compass(position = c("right", "top"), type = "arrow", size = 2)
+```
+
+```{r}
+# Combine the plots
+combined_lisa_map <- tmap_arrange(
+  lisa_map_rr_2020,
+  lisa_map_rr_2022,
+  ncol = 2,
+  # Arrange the maps in 2 columns (side by side)
+  widths = 24,
+  heights = 9,
+  sync = FALSE,
+  asp = 0,
+  outer.margins = 0.02
+)
+
+combined_lisa_map
+
+```
+```{r}
+?tm_layout
+```
+
+```{r}
+# Save the plot
+tmap_save(combined_lisa_map, filename = here("plots","rr_combined_lisa_map.png"), scale = 1, width = 24, height = 9, dpi = 300)
+```
+$$
+\textbf{Local Moran Map}
+$$
+```{r}
+# Create the Significance Map
+
+# 2020
+significance_map_rr_2020 <- tm_shape(moran_local_rr_2020) +
+  tm_polygons("local_moran_p", 
+              palette = c("#238b45", "#74c476", "#edf8e9"), 
+              breaks = c(0, 0.01, 0.05, 1),
+              labels = c("p < 0.01", "0.01 <= p < 0.05", "p >= 0.05"),
+              title = "Significance") +
+  tm_borders() +
+  tm_layout(legend.outside = TRUE, 
+            title = "Local Moran Significance Map for Relative Risk 2020")  +
+tm_scale_bar(position = c("left", "bottom"), width = "100 km", text.size = 0.5) +
+tm_compass(position = c("right", "top"), type = "arrow", size = 2)
+
+
+# 2022
+significance_map_rr_2022 <- tm_shape(moran_local_rr_2022) +
+  tm_polygons("local_moran_p", 
+              palette = c("#238b45", "#74c476", "#edf8e9"), 
+              breaks = c(0, 0.01, 0.05, 1),
+              labels = c("p < 0.01", "0.01 <= p < 0.05", "p >= 0.05"),
+              title = "Significance") +
+  tm_borders() +
+  tm_layout(legend.outside = TRUE, 
+            title = "Local Moran Significance Map for Relative Risk 2022")  +
+tm_scale_bar(position = c("left", "bottom"), width = "100 km", text.size = 0.5) +
+tm_compass(position = c("right", "top"), type = "arrow", size = 2)
+```
+
+```{r}
+# Combine the plots
+combined_significance_map <- tmap_arrange(
+  significance_map_rr_2020,
+  significance_map_rr_2022,
+  ncol = 2,
+  # Arrange the maps in 2 columns (side by side)
+  widths = 24,
+  heights = 9,
+  sync = FALSE,
+  asp = 0,
+  outer.margins = 0.02
+)
+
+combined_significance_map
+
+```
+
+```{r}
+# Save the plot
+tmap_save(combined_significance_map, filename = here("plots","rr_combined_significance_map.png"), scale = 1, width = 24, height = 9, dpi = 300)
+```
