@@ -1,0 +1,211 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+---
+
+
+$$
+\text{Install and Load packages}
+$$
+Install all the neccesary libraries
+
+```{r}
+if (!requireNamespace("pak", quietly = TRUE)) {
+  install.packages("pak")
+}
+```
+
+```{r}
+# Define a vector of required packages
+packages <- c(
+  "tidyverse",    # For data manipulation and visualization
+  "sf",           # For simple feature operations (handling spatial data)
+  "here",         # For managing file paths
+  "patchwork",    # For organizing multiple plots
+  "raster",       # For handling raster data
+  "exactextractr",# For extracting data from raster objects
+  "tidygeocoder", # For geocoding (converting addresses to geographic coordinates)
+  "ggmap",        # For spatial visualization and mapping
+  "ggspatial",    # For adding spatial context to ggplot2 visualizations
+  "epitrix",      # For epidemiological analysis
+  "janitor",      # For data cleaning
+  "leaflet",      # For interactive maps
+  "HistData",     # For historical datasets
+  "gtsummary",     # For creating summary tables
+  "spdep", 
+  "tmap"
+)
+```
+
+
+```{r}
+# Install all the packages using the `pak` package
+packages |> pak::pak()
+```
+
+Load packages 
+```{r}
+lapply(packages, library, character.only = TRUE)
+```
+
+$$
+\text{Load Data}
+$$
+
+Load shape file
+
+```{r}
+?here
+```
+
+```{r}
+india_state_sf <- here("spatial_files", "India_State_Boundary", "India_State_Boundary.shp") |>
+  st_read()
+```
+
+Explore the data
+
+```{r}
+summary(india_state_sf)
+```
+```{r}
+head(india_state_sf)
+```
+
+
+```{r}
+data_crs <- st_crs(india_state_sf)
+data_crs
+```
+
+Set CSR
+```{r}
+
+india_state_sf |>  st_transform(crs = 4326)
+```
+
+
+
+Interactive Plot 
+```{r}
+india_state_sf <- st_make_valid(india_state_sf)
+```
+
+
+```{r}
+tmap_mode("view")
+tm_shape(india_state_sf) + tm_polygons(alpha=0.5)
+```
+
+Basic Plots
+```{r}
+india_state_sf |> 
+  ggplot() +
+  geom_sf()
+```
+```{r}
+india_state_sf |> 
+  ggplot() +
+  geom_sf() + 
+  annotation_scale(location = "bl") + # Add Scale
+  annotation_north_arrow(location = "tr", which_north = "true") # add north arrow
+```
+```{r}
+india_state_sf |> 
+  ggplot() +
+  geom_sf() + 
+  annotation_scale(location = "bl") + # Add Scale
+  annotation_north_arrow(location = "tr", which_north = "true") + # add north arrow
+  labs(title = "India State Boundary", 
+       caption = "Source: Survey of India, Govt. of India")
+
+```
+
+Change the CRS of the sf
+```{r}
+india_state_sf_projected <- india_state_sf  |>  
+  st_transform(32643)
+
+india_state_sf_projected |>  
+  st_crs()
+```
+
+```{r}
+india_state_sf_projected |> 
+  ggplot() +
+  geom_sf() + 
+  annotation_scale(location = "bl") + # Add Scale
+  annotation_north_arrow(location = "tr", which_north = "true") + # add north arrow
+  labs(title = "India State Boundary", 
+       caption = "Source: Survey of India, Govt. of India")
+```
+Combined Plot 
+```{r}
+plot_1 <- india_state_sf |> 
+  ggplot() +
+  geom_sf() + 
+  annotation_scale(location = "bl") + # Add Scale
+  annotation_north_arrow(location = "tr", which_north = "true") + # add north arrow
+  labs(title = "India State Boundary",
+       subtitle = "Geodetic CRS (4326)",
+       caption = "Source: Survey of India, Govt. of India")
+
+plot_2 <- india_state_sf_projected |> 
+  ggplot() +
+  geom_sf() + 
+  annotation_scale(location = "bl") + # Add Scale
+  annotation_north_arrow(location = "tr", which_north = "true") + # add north arrow
+  labs(title = "India State Boundary",
+       subtitle = "Projected CRS (32643)",
+       caption = "Source: Survey of India, Govt. of India")
+
+## Combine both the plots using `patchwork`
+combined_plot <- plot_1 + plot_2
+combined_plot
+```
+Save the Plots
+```{r}
+plot_1 |> 
+  ggsave(file = here("plots", "ind_state_map_4326.png"),
+         width = 6, 
+         height = 6)
+
+plot_2 |> 
+  ggsave(file = here("plots", "ind_state_map_32643.png"), 
+         width = 6, 
+         height = 6)
+
+combined_plot |> 
+  ggsave(file = here("plots", "india_state_map_combined.png"),
+         width = 12, 
+         height = 6,
+         scale = 1.5)
+
+india_state_sf |> 
+  write_rds(here("spatial_files", "india_state_sf_4326.rds"))
+
+india_state_sf_projected |> 
+  write_rds(here("spatial_files", "india_state_sf_32643.rds"))
+```
+Extract One state
+```{r}
+unique(india_state_sf_projected$State_Name)
+```
+
+```{r}
+
+mh_sf <- india_state_sf |> 
+  filter(State_Name == "Maharashtra")
+
+mh_sf |> 
+  ggplot() +
+  geom_sf()
+
+mh_sf |> 
+  write_rds(here("spatial_files", "mh_sf.rds"))
+```
+
