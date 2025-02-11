@@ -1,1 +1,1 @@
-This is the first assignment
+Set of Hands on excercises and assignments with reading material
